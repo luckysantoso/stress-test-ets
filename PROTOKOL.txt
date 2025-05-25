@@ -1,4 +1,4 @@
-FILE SERVER
+zFILE SERVER
 TUJUAN: melayani client dalam request file server
 
 ATURAN PROTOKOL:
@@ -40,27 +40,26 @@ GET
   - data: pesan kesalahan
 
 UPLOAD
-* TUJUAN: untuk mengunggah file dari client ke server
+* TUJUAN: untuk mengunggah file ke server
 * PARAMETER:
-  - PARAMETER1 : nama file
-  - PARAMETER2 : isi file dalam bentuk base64
+  - PARAMETER1 : path dari file yang akan diupload
 * RESULT:
 - BERHASIL:
   - status: OK
-  - data: konfirmasi upload berhasil
+  - data_namafile: nama file hasil upload (berupa hash)
+  - message: File uploaded successfully
 - GAGAL:
   - status: ERROR
   - data: pesan kesalahan
 
 DELETE
-* TUJUAN: untuk menghapus file dari server
+* TUJUAN: untuk menghapus file di server
 * PARAMETER:
-  - PARAMETER1 : nama file
+  - PARAMETER1 : nama file yang akan dihapus
 * RESULT:
 - BERHASIL:
   - status: OK
-  - data: konfirmasi penghapusan berhasil
+  - message: File deleted successfully
 - GAGAL:
   - status: ERROR
   - data: pesan kesalahan
-

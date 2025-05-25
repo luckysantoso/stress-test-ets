@@ -1,117 +1,182 @@
-import socket
-import json
+# file_client_cli.py
+
+"""
+Client-side utilities for sending commands to the file server.
+"""
+
 import base64
+import json
 import logging
+import os
+import socket
 
-server_address=('0.0.0.0',7777)
+from typing import Any, Dict, Tuple
 
-def send_command(command_str=""):
-    global server_address
+# Server configuration
+SERVER_HOST = '172.16.16.101'
+SERVER_PORT = 7000
+SERVER_ADDRESS: Tuple[str, int] = (SERVER_HOST, SERVER_PORT)
+
+# Networking constants
+BUFFER_SIZE = 1_048_576
+SOCKET_TIMEOUT = 60
+
+# Logging configuration
+logging.basicConfig(level=logging.ERROR, format='[%(levelname)s] %(message)s')
+
+
+def send_command(command: str = '') -> Dict[str, Any]:
+    """
+    Send a raw command string to the server and return the parsed JSON response.
+    """
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect(server_address)
-    logging.warning(f"connecting to {server_address}")
+    sock.settimeout(SOCKET_TIMEOUT)
+
     try:
-        logging.warning(f"sending message ")
-        sock.sendall(command_str.encode())
-        # Look for the response, waiting until socket is done (no more data)
-        data_received="" #empty string
+        sock.connect(SERVER_ADDRESS)
+        logging.warning(f'Connecting to {SERVER_ADDRESS}')
+        sock.sendall(command.encode())
+
+        data_buffer = ''
         while True:
-            #socket does not receive all data at once, data comes in part, need to be concatenated at the end of process
-            data = sock.recv(16)
-            if data:
-                #data is not empty, concat with previous content
-                data_received += data.decode()
-                if "\r\n\r\n" in data_received:
-                    break
-            else:
-                # no more data, stop the process by break
+            try:
+                chunk = sock.recv(BUFFER_SIZE)
+            except socket.timeout:
+                logging.error('Receive timeout')
+                return {'status': 'ERROR', 'data': 'timeout during receive'}
+
+            if not chunk:
                 break
-        # at this point, data_received (string) will contain all data coming from the socket
-        # to be able to use the data_received as a dict, need to load it using json.loads()
-        hasil = json.loads(data_received)
-        logging.warning("data received from server:")
-        return hasil
-    except:
-        logging.warning("error during data receiving")
-        return False
+
+            decoded = chunk.decode()
+            data_buffer += decoded
+
+            if '\r\n\r\n' in decoded:
+                data_buffer = data_buffer.split('\r\n\r\n', 1)[0]
+                break
+
+        return json.loads(data_buffer)
+
+    except socket.timeout:
+        logging.error('Socket operation timed out')
+        return {'status': 'ERROR', 'data': 'timeout during connect/send'}
+    except Exception as err:
+        logging.warning(f'Error during communication: {err}')
+        return {'status': 'ERROR', 'data': str(err)}
+    finally:
+        sock.close()
 
 
-def remote_list():
-    command_str=f"LIST"
-    hasil = send_command(command_str)
-    if (hasil['status']=='OK'):
-        print("daftar file : ")
-        for nmfile in hasil['data']:
-            print(f"- {nmfile}")
+def remote_list() -> bool:
+    """
+    Request the list of files from the server and log them.
+    """
+    response = send_command('LIST\n')
+    if response.get('status') == 'OK':
+        logging.info('Files on server:')
+        for filename in response.get('data', []):
+            logging.info(f'- {filename}')
         return True
-    else:
-        print("Gagal")
+
+    logging.error(f"Error listing files: {response.get('data')}")
+    raise RuntimeError(response.get('data', 'Unknown error'))
+
+
+def remote_get(filename: str) -> bool:
+    """
+    Download a file from the server by name.
+    """
+    response = send_command(f'GET {filename}\n')
+    if response.get('status') != 'OK':
+        logging.error(f"Error getting file: {response.get('data')}")
+        raise RuntimeError(response.get('data', 'Unknown error'))
+
+    file_name = response.get('data_namafile', filename)
+    file_data_b64 = response.get('data_file', '')
+    file_bytes = base64.b64decode(file_data_b64)
+
+    try:
+        # Write to disk if needed:
+        # with open(file_name, 'wb') as f:
+        #     f.write(file_bytes)
+        pass
+    except Exception as err:
+        logging.error(f'Error writing file: {err}')
         return False
 
-def remote_get(filename=""):
-    command_str=f"GET {filename}"
-    hasil = send_command(command_str)
-    if (hasil['status']=='OK'):
-        #proses file dalam bentuk base64 ke bentuk bytes
-        namafile= hasil['data_namafile']
-        isifile = base64.b64decode(hasil['data_file'])
-        fp = open(namafile,'wb+')
-        fp.write(isifile)
-        fp.close()
+    return True
+
+
+def remote_upload(filepath: str) -> bool:
+    """
+    Upload a local file to the server.
+    """
+    if not os.path.isfile(filepath):
+        logging.error(f'File not found: {filepath}')
+        raise FileNotFoundError(f'File not found: {filepath}')
+
+    with open(filepath, 'rb') as f:
+        encoded_data = base64.b64encode(f.read()).decode()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(SOCKET_TIMEOUT)
+
+    try:
+        sock.connect(SERVER_ADDRESS)
+        sock.sendall('UPLOAD\n'.encode())
+
+        try:
+            handshake = sock.recv(BUFFER_SIZE).decode().strip()
+        except socket.timeout:
+            logging.error('Handshake receive timeout')
+            raise RuntimeError('Timeout during upload handshake')
+
+        if 'READY' not in handshake:
+            logging.error('Server not ready for upload')
+            raise RuntimeError('Server not ready for upload')
+
+        # Send data in chunks
+        for i in range(0, len(encoded_data), BUFFER_SIZE):
+            chunk = encoded_data[i:i + BUFFER_SIZE]
+            try:
+                sock.sendall((chunk + '\n').encode())
+            except socket.timeout:
+                logging.error('Upload send timeout')
+                raise RuntimeError('Timeout during file upload')
+
+        # Signal end of upload
+        sock.sendall('ENDUPLOAD\n'.encode())
+
+        try:
+            final_resp = sock.recv(BUFFER_SIZE).decode().strip()
+        except socket.timeout:
+            logging.error('Final response timeout')
+            raise RuntimeError('Timeout during upload final response')
+
+        logging.info(f'Final response: {final_resp}')
         return True
-    else:
-        print("Gagal")
-        return False
-    
 
-def remote_upload(filename=""):
-    with open(filename, 'rb') as fp:
-        file_data = fp.read()
-    file_data_base64 = base64.b64encode(file_data).decode()
-    command_str = f"UPLOAD {filename} {file_data_base64}"
-    hasil = send_command(command_str)
-    if hasil['status'] == 'OK':
-        print("Upload berhasil")
+    except Exception as err:
+        logging.error(f'Error during upload: {err}')
+        raise
+    finally:
+        sock.close()
+
+
+def remote_delete(filename: str) -> bool:
+    """
+    Delete a file on the server by name.
+    """
+    response = send_command(f'DELETE {filename}\n')
+    if response.get('status') == 'OK':
+        logging.warning('File deleted successfully')
         return True
-    else:
-        print("Gagal")
-        return False
+
+    logging.warning('Failed to delete file')
+    return False
 
 
-def remote_delete(filename=""):
-    command_str = f"DELETE {filename}"
-    hasil = send_command(command_str)
-    if hasil['status'] == 'OK':
-        print("Hapus berhasil")
-        return True
-    else:
-        print("Gagal")
-        return False
-
-
-if __name__=='__main__':
-    server_address=('172.16.16.101',6000)
-    while True:
-        print("""
-Command List:\n
-1: LIST\n
-2: GET <FILEPATH>\n
-3: UPLOAD <FILEPATH>\n
-4: DELETE <FILEPATH>\n
-5: EXIT
-              """)
-        com = input("Enter Command: ")
-        com = com.strip().split()
-        
-        if com[0].upper() == 'LIST':
-            remote_list()
-        elif com[0].upper() == 'GET' and len(com) == 2:
-            remote_get(com[1])
-        elif com[0].upper() == 'UPLOAD' and len(com) == 2:
-            remote_upload(com[1])
-        elif com[0].upper() == 'DELETE' and len(com) == 2:
-            remote_delete(com[1])
-        elif com[0].upper() == 'EXIT':
-            break
-        else:
-            print('Invalid Command\n')
+if __name__ == '__main__':
+    logging.getLogger().setLevel(logging.INFO)
+    remote_list()
+    remote_get('file_100mb.bin')

@@ -2,7 +2,28 @@ import os
 import json
 import base64
 from glob import glob
+import logging
+import hashlib
+import shutil
+import zlib
+logging.basicConfig(level=logging.ERROR)
+def detect_file_type(file_bytes):
+    header = file_bytes[:16]  # read enough bytes
 
+    if header.startswith(b'\x89PNG\r\n\x1a\n'):
+        return '.png'
+    elif header.startswith(b'\xff\xd8\xff'):
+        return '.jpeg'
+    elif header.startswith(b'%PDF'):
+        return '.pdf'
+    elif header.startswith(b'GIF87a') or header.startswith(b'GIF89a'):
+        return '.gif'
+    elif header.startswith(b'PK\x03\x04'):
+        return '.zip'
+    elif header.startswith(b'ID3') or header[:2] == b'\xff\xfb':
+        return '.mpeg'
+    else:
+        return ''  # fallback for unknown
 
 class FileInterface:
     def __init__(self):
@@ -28,26 +49,35 @@ class FileInterface:
         
     def upload(self, params=[]):
         try:
-            filename = params[0]
-            file_data_base64 = params[1]
-            file_data = base64.b64decode(file_data_base64)
-            with open(f"{filename}", 'wb') as fp:
-                fp.write(file_data)
-            return dict(status='OK', data=f"File {filename} uploaded successfully")
+            temp_filepath = params[0]
+
+            with open(temp_filepath, 'rb') as f:
+                file_bytes = f.read()
+                hashed_name = hashlib.md5(file_bytes).hexdigest() 
+                file_type = detect_file_type(file_bytes)
+
+            with open(hashed_name+file_type, 'wb') as out_f:
+                out_f.write(file_bytes)
+
+            return dict(
+                status='OK',
+                message='File uploaded successfully',
+                data=dict(
+                    file_path=hashed_name+file_type,
+                )
+            )
         except Exception as e:
             return dict(status='ERROR', data=str(e))
 
     def delete(self, params=[]):
         try:
             filename = params[0]
-            if os.path.isfile(filename):
-                os.remove(filename)
-                return dict(status='OK', data=f"File {filename} deleted successfully")
-            else:
-                return dict(status='ERROR', data="File not found")
+            if (filename == ''):
+                return None
+            os.remove(filename)
+            return dict(status='OK', message='File deleted successfully')
         except Exception as e:
             return dict(status='ERROR', data=str(e))
-
 
 if __name__=='__main__':
     f = FileInterface()
